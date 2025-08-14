@@ -40,6 +40,7 @@ class PluginController {
             "discoverServices" to this::discoverServices,
             "getDiscoveredServices" to this::discoverServices,
             "readRssi" to this::readRssi,
+            "requestPhy2" to this::requestPhy2,
         )
 
     private lateinit var bleClient: com.signify.hue.flutterreactiveble.ble.BleClient
@@ -385,6 +386,21 @@ class PluginController {
                 result.success(info.toByteArray())
             }, { error ->
                 result.error("read_rssi_error", error.message, null)
+            })
+            .discard()
+    }
+
+    private fun requestPhy2(
+        call: MethodCall,
+        result: Result
+    ) {
+        val args = pb.ClearGattCacheRequest.parseFrom(call.arguments as ByteArray)
+        bleClient.requestPhy2(args.deviceId)
+            .observeOn(AndroidSchedulers.mainThread())
+            .subscribe({ _ ->
+                result.success(null)
+            }, { error ->
+                result.error("requestPhy2", error.message, null)
             })
             .discard()
     }
