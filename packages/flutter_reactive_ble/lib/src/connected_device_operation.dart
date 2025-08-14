@@ -30,6 +30,8 @@ abstract class ConnectedDeviceOperation {
 
   Future<void> requestConnectionPriority(
       String deviceId, ConnectionPriority priority);
+
+  Future<void> requestPhy2(String deviceId);
 }
 
 class ConnectedDeviceOperationImpl implements ConnectedDeviceOperation {
@@ -43,19 +45,16 @@ class ConnectedDeviceOperationImpl implements ConnectedDeviceOperation {
       _blePlatform.charValueUpdateStream;
 
   @override
-  Future<List<int>> readCharacteristic(
-    CharacteristicInstance characteristic,
-  ) async {
+  Future<List<int>> readCharacteristic(CharacteristicInstance characteristic) {
     final specificCharacteristicValueStream = characteristicValueStream
         .where((update) => update.characteristic == characteristic)
-        .map((update) => update.result);
+        .map((update) => update.result.dematerialize());
 
-    final result = await _blePlatform
+    return _blePlatform
         .readCharacteristic(characteristic)
         .asyncExpand((_) => specificCharacteristicValueStream)
         .firstWhere((_) => true,
             orElse: () => throw NoBleCharacteristicDataReceived());
-    return result.dematerialize();
   }
 
   @override
@@ -119,6 +118,10 @@ class ConnectedDeviceOperationImpl implements ConnectedDeviceOperation {
       _blePlatform
           .requestConnectionPriority(deviceId, priority)
           .then((message) => message.result.dematerialize());
+
+  @override
+  Future<void> requestPhy2(String deviceId) async =>
+      _blePlatform.requestPhy2(deviceId);
 }
 
 @visibleForTesting

@@ -60,7 +60,8 @@ class FlutterReactiveBle {
   BleStatus get status => _status;
 
   /// A stream providing connection updates for all the connected BLE devices.
-  Stream<ConnectionStateUpdate> get connectedDeviceStream => Repeater.broadcast(onListenEmitFrom: () async* {
+  Stream<ConnectionStateUpdate> get connectedDeviceStream =>
+      Repeater.broadcast(onListenEmitFrom: () async* {
         await initialize();
         yield* _deviceConnector.deviceConnectionStateUpdateStream;
       }).stream;
@@ -91,6 +92,10 @@ class FlutterReactiveBle {
   late DeviceScanner _deviceScanner;
   late Logger _debugLogger;
 
+  Future<void> disconnectDevice(String deviceId) async {
+    return await _blePlatform.disconnectDevice(deviceId);
+  }
+
   /// Initializes this [FlutterReactiveBle] instance and its platform-specific
   /// counterparts.
   ///
@@ -104,7 +109,8 @@ class FlutterReactiveBle {
       );
 
       if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
-        ReactiveBlePlatform.instance = const ReactiveBleMobilePlatformFactory().create(
+        ReactiveBlePlatform.instance =
+            const ReactiveBleMobilePlatformFactory().create(
           logger: _debugLogger,
         );
       }
@@ -160,7 +166,8 @@ class FlutterReactiveBle {
   /// This method assumes there is a single characteristic with the ids specified in [characteristic]. If there are
   /// multiple characteristics with the same id on a device, use [resolve] to find them all. Or use
   /// [getDiscoveredServices] to select the [Service]s and [Characteristic]s you're interested in.
-  Future<List<int>> readCharacteristic(QualifiedCharacteristic characteristic) async {
+  Future<List<int>> readCharacteristic(
+      QualifiedCharacteristic characteristic) async {
     await initialize();
     return (await resolveSingle(characteristic)).read();
   }
@@ -177,7 +184,8 @@ class FlutterReactiveBle {
     required List<int> value,
   }) async {
     await initialize();
-    await (await resolveSingle(characteristic)).write(value, withResponse: true);
+    await (await resolveSingle(characteristic))
+        .write(value, withResponse: true);
   }
 
   /// Writes a value to the specified characteristic without waiting for an acknowledgement.
@@ -197,7 +205,8 @@ class FlutterReactiveBle {
     required List<int> value,
   }) async {
     await initialize();
-    await (await resolveSingle(characteristic)).write(value, withResponse: false);
+    await (await resolveSingle(characteristic))
+        .write(value, withResponse: false);
   }
 
   /// Request a specific MTU for a connected device.
@@ -216,10 +225,20 @@ class FlutterReactiveBle {
   /// Requests for a connection parameter update on the connected device.
   ///
   /// Always completes with an error on iOS, as there is no way (and no need) to perform this operation on iOS.
-  Future<void> requestConnectionPriority({required String deviceId, required ConnectionPriority priority}) async {
+  Future<void> requestConnectionPriority(
+      {required String deviceId, required ConnectionPriority priority}) async {
     await initialize();
 
-    return _connectedDeviceOperator.requestConnectionPriority(deviceId, priority);
+    return _connectedDeviceOperator.requestConnectionPriority(
+        deviceId, priority);
+  }
+
+  /// Requests for a connection parameter update on the connected device.
+  ///
+  /// Always completes with an error on iOS, as there is no way (and no need) to perform this operation on iOS.
+  Future<void> requestPhy2({required String deviceId}) async {
+    await initialize();
+    return _connectedDeviceOperator.requestPhy2(deviceId);
   }
 
   /// Scan for BLE peripherals advertising the services specified in [withServices]
@@ -267,7 +286,8 @@ class FlutterReactiveBle {
       initialize().asStream().asyncExpand(
             (_) => _deviceConnector.connect(
               id: id,
-              servicesWithCharacteristicsToDiscover: servicesWithCharacteristicsToDiscover,
+              servicesWithCharacteristicsToDiscover:
+                  servicesWithCharacteristicsToDiscover,
               connectionTimeout: connectionTimeout,
             ),
           );
@@ -298,7 +318,8 @@ class FlutterReactiveBle {
               id: id,
               withServices: withServices,
               prescanDuration: prescanDuration,
-              servicesWithCharacteristicsToDiscover: servicesWithCharacteristicsToDiscover,
+              servicesWithCharacteristicsToDiscover:
+                  servicesWithCharacteristicsToDiscover,
               connectionTimeout: connectionTimeout,
             ),
           );
@@ -315,7 +336,8 @@ class FlutterReactiveBle {
   /// When discovery fails this method throws an [Exception].
   ///
   /// Use [getDiscoveredServices] to get the discovered services
-  Future<void> discoverAllServices(String deviceId) => _connectedDeviceOperator.discoverServices(deviceId);
+  Future<void> discoverAllServices(String deviceId) =>
+      _connectedDeviceOperator.discoverServices(deviceId);
 
   /// Services can be discovered by:
   /// - specify `servicesWithCharacteristicsToDiscover` in [connectToDevice] or [connectToAdvertisingDevice]. Or,
@@ -327,13 +349,15 @@ class FlutterReactiveBle {
   /// Note: On Android, this method performs service discovery if one was done yet after connecting the device.
   Future<List<Service>> getDiscoveredServices(String deviceId) async {
     _disconnectionUpdates ??= connectedDeviceStream
-        .where((update) => update.connectionState == DeviceConnectionState.disconnected)
+        .where((update) =>
+            update.connectionState == DeviceConnectionState.disconnected)
         .listen((update) {
       _services[update.deviceId]?.forEach((service) => service._markInvalid());
       _services[update.deviceId]?.clear();
     });
 
-    final discoveredServices = await _connectedDeviceOperator.getDiscoverServices(deviceId);
+    final discoveredServices =
+        await _connectedDeviceOperator.getDiscoverServices(deviceId);
 
     final services = _services[deviceId] ?? [];
 
@@ -351,27 +375,34 @@ class FlutterReactiveBle {
         },
       );
 
-      for (final discoveredCharacteristic in discoveredService.characteristics) {
-        if (!service._characteristics.any((char) => _isMatchingCharacteristic(char, discoveredCharacteristic))) {
+      for (final discoveredCharacteristic
+          in discoveredService.characteristics) {
+        if (!service._characteristics.any((char) =>
+            _isMatchingCharacteristic(char, discoveredCharacteristic))) {
           service._characteristics.add(Characteristic._(
             id: discoveredCharacteristic.characteristicId,
             instanceId: discoveredCharacteristic.characteristicInstanceId,
             service: service,
             lib: this,
             isReadable: discoveredCharacteristic.isReadable,
-            isWritableWithoutResponse: discoveredCharacteristic.isWritableWithoutResponse,
-            isWritableWithResponse: discoveredCharacteristic.isWritableWithResponse,
+            isWritableWithoutResponse:
+                discoveredCharacteristic.isWritableWithoutResponse,
+            isWritableWithResponse:
+                discoveredCharacteristic.isWritableWithResponse,
             isNotifiable: discoveredCharacteristic.isNotifiable,
             isIndicatable: discoveredCharacteristic.isIndicatable,
           ));
         }
       }
-      service._characteristics.removeWhere((char) => !discoveredService.characteristics.any(
-            (discoveredCharacteristic) => _isMatchingCharacteristic(char, discoveredCharacteristic),
-          ));
+      service._characteristics
+          .removeWhere((char) => !discoveredService.characteristics.any(
+                (discoveredCharacteristic) =>
+                    _isMatchingCharacteristic(char, discoveredCharacteristic),
+              ));
     }
     services.removeWhere(
-      (service) => !discoveredServices.any((discoveredService) => _isMatchingService(service, discoveredService)),
+      (service) => !discoveredServices.any((discoveredService) =>
+          _isMatchingService(service, discoveredService)),
     );
 
     return UnmodifiableListView(services);
@@ -379,10 +410,13 @@ class FlutterReactiveBle {
 
   StreamSubscription<ConnectionStateUpdate>? _disconnectionUpdates;
 
-  bool _isMatchingService(Service service, DiscoveredService discoveredService) =>
-      service.id == discoveredService.serviceId && service._instanceId == discoveredService.serviceInstanceId;
+  bool _isMatchingService(
+          Service service, DiscoveredService discoveredService) =>
+      service.id == discoveredService.serviceId &&
+      service._instanceId == discoveredService.serviceInstanceId;
 
-  bool _isMatchingCharacteristic(Characteristic char, DiscoveredCharacteristic discoveredCharacteristic) =>
+  bool _isMatchingCharacteristic(Characteristic char,
+          DiscoveredCharacteristic discoveredCharacteristic) =>
       char.id == discoveredCharacteristic.characteristicId &&
       char._instanceId == discoveredCharacteristic.characteristicInstanceId;
 
@@ -393,13 +427,15 @@ class FlutterReactiveBle {
   /// Always completes with an error on iOS, as there is no way (and no need) to perform this operation on iOS.
   ///
   /// The connection may need to be reestablished after successful GATT attribute cache clearing.
-  Future<void> clearGattCache(String deviceId) =>
-      _blePlatform.clearGattCache(deviceId).then((info) => info.dematerialize());
+  Future<void> clearGattCache(String deviceId) => _blePlatform
+      .clearGattCache(deviceId)
+      .then((info) => info.dematerialize());
 
   /// Reads the RSSI of the of the peripheral with the given device ID.
   /// The peripheral must be connected, otherwise a [PlatformException] will be
   /// thrown
-  Future<int> readRssi(String deviceId) async => _blePlatform.readRssi(deviceId);
+  Future<int> readRssi(String deviceId) async =>
+      _blePlatform.readRssi(deviceId);
 
   /// Subscribes to updates from the characteristic specified.
   ///
@@ -408,21 +444,27 @@ class FlutterReactiveBle {
   /// This method assumes there is a single characteristic with the ids specified in [characteristic]. If there are
   /// multiple characteristics with the same id on a device, use [resolve] to find them all. Or use
   /// [getDiscoveredServices] to select the [Service]s and [Characteristic]s you're interested in.
-  Stream<List<int>> subscribeToCharacteristic(QualifiedCharacteristic characteristic) async* {
+  Stream<List<int>> subscribeToCharacteristic(
+      QualifiedCharacteristic characteristic) async* {
     yield* (await resolveSingle(characteristic)).subscribe();
   }
 
-  Future<Iterable<Characteristic>> resolve(QualifiedCharacteristic characteristic) async {
+  Future<Iterable<Characteristic>> resolve(
+      QualifiedCharacteristic characteristic) async {
     final services = await getDiscoveredServices(characteristic.deviceId);
-    return services
-        .withId(characteristic.serviceId)
-        .expand((service) => service.characteristics.withId(characteristic.characteristicId));
+    return services.withId(characteristic.serviceId).expand((service) =>
+        service.characteristics.withId(characteristic.characteristicId));
   }
 
-  Future<Characteristic> resolveSingle(QualifiedCharacteristic characteristic) async {
+  Future<Characteristic> resolveSingle(
+      QualifiedCharacteristic characteristic) async {
     final chars = await resolve(characteristic);
-    if (chars.isEmpty) throw Exception("Characteristic not found or discovered: $characteristic");
-    if (chars.length > 1) throw Exception("Multiple matching characteristics found: $characteristic");
+    if (chars.isEmpty)
+      throw Exception(
+          "Characteristic not found or discovered: $characteristic");
+    if (chars.length > 1)
+      throw Exception(
+          "Multiple matching characteristics found: $characteristic");
     return chars.single;
   }
 
@@ -453,7 +495,8 @@ class Service {
   final String deviceId;
 
   /// Discovered characteristics
-  List<Characteristic> get characteristics => UnmodifiableListView(_characteristics);
+  List<Characteristic> get characteristics =>
+      UnmodifiableListView(_characteristics);
 
   final List<Characteristic> _characteristics = [];
 
@@ -525,9 +568,11 @@ class Characteristic {
     _assertValidity();
 
     if (withResponse) {
-      await _lib._connectedDeviceOperator.writeCharacteristicWithResponse(_ids, value: value);
+      await _lib._connectedDeviceOperator
+          .writeCharacteristicWithResponse(_ids, value: value);
     } else {
-      await _lib._connectedDeviceOperator.writeCharacteristicWithoutResponse(_ids, value: value);
+      await _lib._connectedDeviceOperator
+          .writeCharacteristicWithoutResponse(_ids, value: value);
     }
   }
 
@@ -587,13 +632,16 @@ class Characteristic {
       );
 
   @override
-  String toString() => "Characteristic($id; $_instanceId; ${service._instanceId})";
+  String toString() =>
+      "Characteristic($id; $_instanceId; ${service._instanceId})";
 }
 
 extension ServiceWithId on Iterable<Service> {
-  Iterable<Service> withId(Uuid id) => where((s) => s.id.expanded == id.expanded);
+  Iterable<Service> withId(Uuid id) =>
+      where((s) => s.id.expanded == id.expanded);
 }
 
 extension CharacteristicWithId on Iterable<Characteristic> {
-  Iterable<Characteristic> withId(Uuid id) => where((c) => c.id.expanded == id.expanded);
+  Iterable<Characteristic> withId(Uuid id) =>
+      where((c) => c.id.expanded == id.expanded);
 }

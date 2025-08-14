@@ -1,15 +1,21 @@
 package com.signify.hue.flutterreactiveble.ble
 
+import android.os.Build
+import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.polidea.rxandroidble2.PhyPair
 import com.polidea.rxandroidble2.RxBleConnection
 import com.polidea.rxandroidble2.RxBleCustomOperation
 import com.polidea.rxandroidble2.RxBleDevice
+import com.polidea.rxandroidble2.RxBlePhy
+import com.polidea.rxandroidble2.RxBlePhyOption
 import com.signify.hue.flutterreactiveble.model.ConnectionState
 import com.signify.hue.flutterreactiveble.model.toConnectionState
 import com.signify.hue.flutterreactiveble.utils.Duration
 import io.reactivex.Completable
 import io.reactivex.Observable
 import io.reactivex.Single
+import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.disposables.Disposable
 import io.reactivex.functions.Function
 import io.reactivex.subjects.BehaviorSubject
@@ -17,9 +23,10 @@ import java.util.concurrent.TimeUnit
 
 internal class DeviceConnector(
     private val device: RxBleDevice,
-    private val connectionTimeout: Duration,
     private val updateListeners: (update: ConnectionUpdate) -> Unit,
     private val connectionQueue: ConnectionQueue,
+    private val shouldCheckDeviceStatus: Boolean,
+    private val manufacturerData: ByteArray,
 ) {
     companion object {
         private const val minTimeMsBeforeDisconnectingIsAllowed = 200L
@@ -67,6 +74,7 @@ internal class DeviceConnector(
         in order to prevent Android from ignoring disconnects we add a delay when we try to
         disconnect to quickly after establishing connection. https://issuetracker.google.com/issues/37121223
          */
+
         if (diff < DeviceConnector.Companion.minTimeMsBeforeDisconnectingIsAllowed) {
             Single.timer(DeviceConnector.Companion.minTimeMsBeforeDisconnectingIsAllowed - diff, TimeUnit.MILLISECONDS)
                 .doFinally {
@@ -74,6 +82,7 @@ internal class DeviceConnector(
                     disposeSubscriptions()
                 }.subscribe()
         } else {
+            Log.d("DeviceConnector","Disconnect immediate")
             sendDisconnectedUpdate(deviceId)
             disposeSubscriptions()
         }
@@ -91,14 +100,27 @@ internal class DeviceConnector(
 
     private fun establishConnection(rxBleDevice: RxBleDevice): Disposable {
         val deviceId = rxBleDevice.macAddress
-
-        val shouldNotTimeout = connectionTimeout.value <= 0L
+        val status = rxBleDevice.connectionState.toConnectionState()
         connectionQueue.addToQueue(deviceId)
         updateListeners(ConnectionUpdateSuccess(deviceId, ConnectionState.CONNECTING.code))
+//        val fastConnection: Observable<EstablishConnectionResult> = if (shouldCheckDeviceStatus && status == ConnectionState.DISCONNECTED) {
+//            Observable.just(
+//                EstablishConnectionFailure(deviceId,
+//                    "Device must not establish connection when attempt to write/read")
+//            )
+//        } else {
+//            connectDevice(rxBleDevice)
+//                .map { EstablishedConnection(rxBleDevice.macAddress, it) }
+//        }
 
         return waitUntilFirstOfQueue(deviceId)
             .switchMap { queue ->
-                if (!queue.contains(deviceId)) {
+                if (shouldCheckDeviceStatus && status == ConnectionState.DISCONNECTED) {
+                    Observable.just(
+                        EstablishConnectionFailure(deviceId,
+                            "Device must not establish connection when attempt to write/read")
+                    )
+                } else if (!queue.contains(deviceId)) {
                     Observable.just(
                         EstablishConnectionFailure(
                             deviceId,
@@ -106,7 +128,7 @@ internal class DeviceConnector(
                         ),
                     )
                 } else {
-                    connectDevice(rxBleDevice, shouldNotTimeout)
+                    connectDevice(rxBleDevice)
                         .map<EstablishConnectionResult> { EstablishedConnection(rxBleDevice.macAddress, it) }
                 }
             }
@@ -142,22 +164,62 @@ internal class DeviceConnector(
             )
     }
 
+    enum class DeviceType {
+        BLUE_RAVEN, GROUND, TRACKER, OTA, BLUE_JAY, BLUE_JAY_PLUS, OTHER
+    }
+
+    /**
+     * Determines the type of BLE device based on its manufacturer data.
+     */
+    private fun getDeviceTypeFromManufacturerData(): DeviceType {
+        if (manufacturerData.isEmpty()) return DeviceType.OTHER
+        if (manufacturerData.size < 2) return DeviceType.OTHER
+
+        return if (manufacturerData.size == 6 || manufacturerData.size == 12) {
+            when (manufacturerData[1].toUByte().toInt()) {
+                0x83 -> DeviceType.BLUE_RAVEN
+                0x86 -> DeviceType.OTA
+                0x4a -> DeviceType.BLUE_JAY_PLUS
+                0x6a -> DeviceType.BLUE_JAY
+                else -> DeviceType.OTHER
+            }
+        } else {
+
+            val trackerMode = when (manufacturerData[0].toUByte().toInt()) {
+                0 -> DeviceType.GROUND
+                1 -> DeviceType.TRACKER
+                2 -> DeviceType.OTHER
+                else -> null
+            }
+
+            val ravenMode = when (manufacturerData[1].toUByte().toInt()) {
+                0x83 -> DeviceType.BLUE_RAVEN
+                0x86 -> DeviceType.OTA
+                0x4a -> DeviceType.BLUE_JAY_PLUS
+                0x6a -> DeviceType.BLUE_JAY
+                else -> null
+            }
+
+            ravenMode ?: trackerMode ?: DeviceType.OTHER
+        }
+    }
+
+
     private fun connectDevice(
         rxBleDevice: RxBleDevice,
-        shouldNotTimeout: Boolean,
     ): Observable<RxBleConnection> =
-        rxBleDevice.establishConnection(shouldNotTimeout)
-            .compose {
-                if (shouldNotTimeout) {
-                    it
-                } else {
-                    it.timeout(
-                        Observable.timer(connectionTimeout.value, connectionTimeout.unit),
-                        Function<RxBleConnection, Observable<Unit>> {
-                            Observable.never<Unit>()
-                        },
-                    )
+        rxBleDevice.establishConnection(false)
+            .observeOn(AndroidSchedulers.mainThread())
+            .retry(4) { throwable ->
+                Log.e("DeviceConnector", "Error: ${throwable.message}")
+                val deviceType =  getDeviceTypeFromManufacturerData()
+                when (deviceType) {
+                    DeviceType.GROUND, DeviceType.TRACKER -> true
+                    else -> false
                 }
+            }
+            .compose {
+                it
             }
 
     internal fun clearGattCache(): Completable =
@@ -197,6 +259,18 @@ internal class DeviceConnector(
                 }
             }
         return connection.queue(operation).ignoreElements()
+    }
+
+    fun requestPhy2(connection: RxBleConnection): Single<PhyPair> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            connection.setPreferredPhy(
+                setOf(RxBlePhy.PHY_2M),
+                setOf(RxBlePhy.PHY_2M),
+                RxBlePhyOption.PHY_OPTION_NO_PREFERRED,
+            )
+        } else {
+            Single.error(Exception("Not supported OS"))
+        }
     }
 
     private fun waitUntilFirstOfQueue(deviceId: String) =
