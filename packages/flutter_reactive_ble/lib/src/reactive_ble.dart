@@ -233,13 +233,6 @@ class FlutterReactiveBle {
         deviceId, priority);
   }
 
-  /// Requests for a connection parameter update on the connected device.
-  ///
-  /// Always completes with an error on iOS, as there is no way (and no need) to perform this operation on iOS.
-  Future<void> requestPhy2({required String deviceId}) async {
-    await initialize();
-    return _connectedDeviceOperator.requestPhy2(deviceId);
-  }
 
   /// Scan for BLE peripherals advertising the services specified in [withServices]
   /// or for all BLE peripherals, if no services is specified. It is recommended to always specify some services.
