@@ -26,7 +26,6 @@ internal class DeviceConnector(
     private val updateListeners: (update: ConnectionUpdate) -> Unit,
     private val connectionQueue: ConnectionQueue,
     private val shouldCheckDeviceStatus: Boolean,
-    private val manufacturerData: ByteArray,
 ) {
     companion object {
         private const val minTimeMsBeforeDisconnectingIsAllowed = 200L
@@ -103,15 +102,6 @@ internal class DeviceConnector(
         val status = rxBleDevice.connectionState.toConnectionState()
         connectionQueue.addToQueue(deviceId)
         updateListeners(ConnectionUpdateSuccess(deviceId, ConnectionState.CONNECTING.code))
-//        val fastConnection: Observable<EstablishConnectionResult> = if (shouldCheckDeviceStatus && status == ConnectionState.DISCONNECTED) {
-//            Observable.just(
-//                EstablishConnectionFailure(deviceId,
-//                    "Device must not establish connection when attempt to write/read")
-//            )
-//        } else {
-//            connectDevice(rxBleDevice)
-//                .map { EstablishedConnection(rxBleDevice.macAddress, it) }
-//        }
 
         return waitUntilFirstOfQueue(deviceId)
             .switchMap { queue ->
@@ -164,59 +154,17 @@ internal class DeviceConnector(
             )
     }
 
-    enum class DeviceType {
-        BLUE_RAVEN, GROUND, TRACKER, OTA, BLUE_JAY, BLUE_JAY_PLUS, OTHER
-    }
-
-    /**
-     * Determines the type of BLE device based on its manufacturer data.
-     */
-    private fun getDeviceTypeFromManufacturerData(): DeviceType {
-        if (manufacturerData.isEmpty()) return DeviceType.OTHER
-        if (manufacturerData.size < 2) return DeviceType.OTHER
-
-        return if (manufacturerData.size == 6 || manufacturerData.size == 12) {
-            when (manufacturerData[1].toUByte().toInt()) {
-                0x83 -> DeviceType.BLUE_RAVEN
-                0x86 -> DeviceType.OTA
-                0x4a -> DeviceType.BLUE_JAY_PLUS
-                0x6a -> DeviceType.BLUE_JAY
-                else -> DeviceType.OTHER
-            }
-        } else {
-
-            val trackerMode = when (manufacturerData[0].toUByte().toInt()) {
-                0 -> DeviceType.GROUND
-                1 -> DeviceType.TRACKER
-                2 -> DeviceType.OTHER
-                else -> null
-            }
-
-            val ravenMode = when (manufacturerData[1].toUByte().toInt()) {
-                0x83 -> DeviceType.BLUE_RAVEN
-                0x86 -> DeviceType.OTA
-                0x4a -> DeviceType.BLUE_JAY_PLUS
-                0x6a -> DeviceType.BLUE_JAY
-                else -> null
-            }
-
-            ravenMode ?: trackerMode ?: DeviceType.OTHER
-        }
-    }
-
 
     private fun connectDevice(
         rxBleDevice: RxBleDevice,
     ): Observable<RxBleConnection> =
         rxBleDevice.establishConnection(false)
             .observeOn(AndroidSchedulers.mainThread())
-            .retry(4) { throwable ->
-                Log.e("DeviceConnector", "Error: ${throwable.message}")
-                val deviceType =  getDeviceTypeFromManufacturerData()
-                when (deviceType) {
-                    DeviceType.GROUND, DeviceType.TRACKER -> true
-                    else -> false
-                }
+            .retry(4) { _ ->
+                // Only try to reconnect to tracker and ground station otherwise shouldn't
+                if ((rxBleDevice.name?.contains("FthrWt") == true)
+                    ||  (rxBleDevice.name?.contains("FthrWt") == true)) true
+                else false
             }
             .compose {
                 it
@@ -259,18 +207,6 @@ internal class DeviceConnector(
                 }
             }
         return connection.queue(operation).ignoreElements()
-    }
-
-    fun requestPhy2(connection: RxBleConnection): Single<PhyPair> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            connection.setPreferredPhy(
-                setOf(RxBlePhy.PHY_2M),
-                setOf(RxBlePhy.PHY_2M),
-                RxBlePhyOption.PHY_OPTION_NO_PREFERRED,
-            )
-        } else {
-            Single.error(Exception("Not supported OS"))
-        }
     }
 
     private fun waitUntilFirstOfQueue(deviceId: String) =
