@@ -74,6 +74,4 @@ interface BleClient {
     ): Single<RequestConnectionPriorityResult>
 
     fun readRssi(deviceId: String): Single<Int>
-
-    fun requestPhy2(deviceId: String): Single<Boolean>
 }

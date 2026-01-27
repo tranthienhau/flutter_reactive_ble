@@ -38,7 +38,6 @@ import kotlin.collections.component2
 open class ReactiveBleClient(private val context: Context) : BleClient {
     private val connectionQueue = ConnectionQueue()
     private val allConnections = CompositeDisposable()
-    private val cachedManufacturer: MutableMap<String, ByteArray> = mutableMapOf()
     companion object {
         // this needs to be in companion update since background isolates respawn the event channels
         // Fix for https://github.com/PhilipsHue/flutter_reactive_ble/issues/277
@@ -48,7 +47,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
         lateinit var rxBleClient: RxBleClient
             internal set
         internal var activeConnections = mutableMapOf<String, DeviceConnector>()
-        internal var discoverService = mutableMapOf<String, RxBleDeviceServices>()
     }
 
     override val connectionUpdateSubject: BehaviorSubject<ConnectionUpdate>
@@ -78,14 +76,12 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
         return rxBleClient.scanBleDevices(
             ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .setLegacy(false)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                .setShouldCheckLocationServicesState(requireLocationServicesEnabled)
                 .build(),
             *filters,
         )
+            .observeOn(AndroidSchedulers.mainThread())
             .map { result ->
-                cachedManufacturer[result.bleDevice.macAddress] = extractManufacturerData(result.scanRecord.manufacturerSpecificData)
                 ScanInfo(
                     result.bleDevice.macAddress,
                     result.scanRecord.deviceName
@@ -167,10 +163,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
             }
         }
             .firstOrError()
-            .map { services ->
-                discoverService[deviceId] = services
-                services
-            }
     }
 
     override fun readCharacteristic(
@@ -184,7 +176,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     connectionResult.rxConnection.resolveCharacteristic(
                         characteristicId,
                         characteristicInstanceId,
-                        discoverService[deviceId]
                     ).flatMap { c: BluetoothGattCharacteristic ->
                         connectionResult.rxConnection.readCharacteristic(c)
                                 /*
@@ -284,11 +275,8 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
     @VisibleForTesting
     internal open fun createDeviceConnector(
         device: RxBleDevice,
-        shouldCheckDeviceStatus: Boolean
-    ): DeviceConnector {
-        val manufacturerData = cachedManufacturer[device.macAddress] ?: byteArrayOf()
-        return DeviceConnector(device, connectionUpdateBehaviorSubject::onNext, connectionQueue, shouldCheckDeviceStatus, manufacturerData)
-    }
+        shouldCheckDeviceStatus: Boolean,
+    ) = DeviceConnector(device,  connectionUpdateBehaviorSubject::onNext, connectionQueue, shouldCheckDeviceStatus)
 
     private fun getConnection(
         deviceId: String,
@@ -312,7 +300,7 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
             .flatMapSingle { connectionResult ->
                 when (connectionResult) {
                     is EstablishedConnection -> {
-                        connectionResult.rxConnection.resolveCharacteristic(characteristicId, characteristicInstanceId, discoverService[deviceId])
+                        connectionResult.rxConnection.resolveCharacteristic(characteristicId, characteristicInstanceId)
                             .flatMap { characteristic ->
                                 connectionResult.rxConnection.bleOperation(characteristic, value)
                                     .map { value -> CharOperationSuccessful(deviceId, value.asList()) }
@@ -345,8 +333,7 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                 } else {
                     deviceConnection.rxConnection.resolveCharacteristic(
                         characteristicId,
-                        characteristicInstanceId,
-                        discoverService[deviceConnection.deviceId]
+                        characteristicInstanceId
                     ).flatMapObservable { characteristic ->
                         val mode =
                             if (characteristic.descriptors.isEmpty()) {
@@ -407,27 +394,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     )
             }
         }.firstOrError()
-
-    override fun requestPhy2(deviceId: String): Single<Boolean> =
-        getConnection(deviceId, shouldCheckDeviceStatus = true)
-            .flatMapSingle { connectionResult ->
-                when (connectionResult) {
-                    is EstablishedConnection -> {
-                        val connector = activeConnections.getOrPut(deviceId) {
-                            createDeviceConnector(rxBleClient.getBleDevice(deviceId),shouldCheckDeviceStatus = true)
-                        }
-                        connector.requestPhy2(connectionResult.rxConnection)
-                    }
-                    is EstablishConnectionFailure ->
-                        Single.error(
-                            java.lang.IllegalStateException(
-                                "Request phy2 failed. Device is not connected",
-                            ),
-                        )
-                }
-            }
-            .flatMapSingle { Single.just(true) }
-            .firstOrError()
 
     // enable this for extra debug output on the android stack
     private fun enableDebugLogging() =
