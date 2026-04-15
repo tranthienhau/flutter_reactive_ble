@@ -216,17 +216,32 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
 
   @override
   Stream<void> readCharacteristic(CharacteristicInstance characteristic) {
-    _logger?.log(
-      'Read characteristic: $characteristic',
-    );
-    return _bleMethodChannel
-        .invokeMethod<void>(
-          "readCharacteristic",
-          _argsToProtobufConverter
-              .createReadCharacteristicRequest(characteristic)
-              .writeToBuffer(),
-        )
-        .asStream();
+    _logger?.log('Read characteristic: $characteristic');
+    return _doRead(characteristic).asStream();
+  }
+
+  Future<void> _doRead(CharacteristicInstance characteristic) async {
+    final handle = await _getOrNegotiateHandle(characteristic);
+    final request = encodeReadRequest(handle);
+    final response = await _bleDataChannel.send(request);
+    if (response == null) throw Exception('readCharacteristic: no response from native');
+    final result = decodeResponse(response);
+    if (result.status == statusError) {
+      _charValueController.add(CharacteristicValue(
+        characteristic: characteristic,
+        result: Result.failure(
+          GenericFailure(
+            code: CharacteristicValueUpdateError.unknown,
+            message: decodeErrorMessage(result.bytes),
+          ),
+        ),
+      ));
+      return;
+    }
+    _charValueController.add(CharacteristicValue(
+      characteristic: characteristic,
+      result: Result.success(result.bytes.toList()),
+    ));
   }
 
   @override
@@ -235,13 +250,26 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
     List<int> value,
   ) async {
     _logger?.log('Write with response to $characteristic, value: $value');
-    return _bleMethodChannel
-        .invokeMethod<List<int>>(
-            "writeCharacteristicWithResponse",
-            _argsToProtobufConverter
-                .createWriteCharacteristicRequest(characteristic, value)
-                .writeToBuffer())
-        .then((data) => _protobufConverter.writeCharacteristicInfoFrom(data!));
+    final handle = await _getOrNegotiateHandle(characteristic);
+    final request = encodeRequest(opWriteWithResponse, handle, value);
+    final response = await _bleDataChannel.send(request);
+    if (response == null) throw Exception('writeWithResponse: no response from native');
+    final result = decodeResponse(response);
+    if (result.status == statusError) {
+      return WriteCharacteristicInfo(
+        characteristic: characteristic,
+        result: Result.failure(
+          GenericFailure(
+            code: WriteCharacteristicFailure.unknown,
+            message: decodeErrorMessage(result.bytes),
+          ),
+        ),
+      );
+    }
+    return WriteCharacteristicInfo(
+      characteristic: characteristic,
+      result: const Result.success(Unit()),
+    );
   }
 
   @override
@@ -249,17 +277,27 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
     CharacteristicInstance characteristic,
     List<int> value,
   ) async {
-    _logger?.log(
-      'Write without response to $characteristic, value: $value',
+    _logger?.log('Write without response to $characteristic, value: $value');
+    final handle = await _getOrNegotiateHandle(characteristic);
+    final request = encodeRequest(opWriteWithoutResponse, handle, value);
+    final response = await _bleDataChannel.send(request);
+    if (response == null) throw Exception('writeWithoutResponse: no response from native');
+    final result = decodeResponse(response);
+    if (result.status == statusError) {
+      return WriteCharacteristicInfo(
+        characteristic: characteristic,
+        result: Result.failure(
+          GenericFailure(
+            code: WriteCharacteristicFailure.unknown,
+            message: decodeErrorMessage(result.bytes),
+          ),
+        ),
+      );
+    }
+    return WriteCharacteristicInfo(
+      characteristic: characteristic,
+      result: const Result.success(Unit()),
     );
-    return _bleMethodChannel
-        .invokeMethod<List<int>>(
-          "writeCharacteristicWithoutResponse",
-          _argsToProtobufConverter
-              .createWriteCharacteristicRequest(characteristic, value)
-              .writeToBuffer(),
-        )
-        .then((data) => _protobufConverter.writeCharacteristicInfoFrom(data!));
   }
 
   @override
