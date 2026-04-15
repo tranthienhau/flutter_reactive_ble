@@ -26,6 +26,13 @@ final class PluginController {
     var connectedDeviceSink: EventSink?
     var characteristicValueUpdateSink: EventSink?
 
+    // Handle map for binary data channel
+    private var handleCounter: Int32 = 0
+    var handleToCharacteristic = [Int32: CBCharacteristic]()
+    private var deviceHandles = [UUID: Set<Int32>]()
+    var notificationMessenger: FlutterBinaryMessenger?
+    private var pendingReadReplies = [Int32: FlutterBinaryReply]()
+
     func initialize(name: String, completion: @escaping PlatformMethodCompletionHandler) {
         if let central = central {
             central.stopScan()
@@ -77,6 +84,7 @@ final class PluginController {
                     // Wait for services & characteristics to be discovered
                     return
                 case .failedToConnect(let underlyingError), .disconnected(let underlyingError):
+                    context.clearHandles(for: peripheral.identifier)
                     failure = underlyingError.map { (.failedToConnect, "\($0)") }
                 }
 
@@ -111,6 +119,24 @@ final class PluginController {
                 sink.add(.success(message))
             },
             onCharacteristicValueUpdate: papply(weak: self) { context, central, characteristic, value, error in
+                // Service a pending binary read reply if one exists
+                if let cbChar = context.handleToCharacteristic.values.first(where: { $0.uuid == CBUUID(data: characteristic.id.data) }),
+                   let handle = context.handleToCharacteristic.first(where: { $0.value === cbChar })?.key,
+                   let reply = context.pendingReadReplies.removeValue(forKey: handle) {
+                    if let value = value {
+                        var response = Data([0x00])
+                        response.append(value)
+                        reply(response)
+                    } else {
+                        var response = Data([0x01])
+                        let msg = error.map { "\($0)" } ?? "read error"
+                        response.append(msg.data(using: .utf8) ?? Data())
+                        reply(response)
+                    }
+                    return
+                }
+
+                // Fall through to existing protobuf notification sink
                 let message = CharacteristicValueInfo.with {
                     $0.characteristic = CharacteristicAddress.with {
                         $0.characteristicUuid = Uuid.with { $0.data = characteristic.id.data }
@@ -614,6 +640,108 @@ final class PluginController {
         } catch let error {
             completion(.failure(makeFlutterError(error: error)))
         }
+    }
+
+    func negotiateHandle(name: String, args: ReadCharacteristicRequest, completion: @escaping PlatformMethodCompletionHandler) {
+        guard let central = central else {
+            completion(.failure(PluginError.notInitialized.asFlutterError))
+            return
+        }
+        guard let peripheralID = UUID(uuidString: args.characteristic.deviceID) else {
+            completion(.failure(PluginError.invalidMethodCall(
+                method: name,
+                details: "invalid deviceID"
+            ).asFlutterError))
+            return
+        }
+        let serviceUUID = CBUUID(data: args.characteristic.serviceUuid.data)
+        let charUUID    = CBUUID(data: args.characteristic.characteristicUuid.data)
+
+        do {
+            let peripheral = try central.peripheral(for: peripheralID)
+            guard
+                let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }),
+                let characteristic = service.characteristics?.first(where: { $0.uuid == charUUID })
+            else {
+                completion(.failure(PluginError.invalidMethodCall(
+                    method: name,
+                    details: "characteristic not found — connect and discover services first"
+                ).asFlutterError))
+                return
+            }
+            handleCounter += 1
+            let handle = handleCounter
+            handleToCharacteristic[handle] = characteristic
+            if deviceHandles[peripheralID] == nil { deviceHandles[peripheralID] = Set() }
+            deviceHandles[peripheralID]!.insert(handle)
+
+            let bytes: [UInt8] = [
+                UInt8((handle >> 24) & 0xFF),
+                UInt8((handle >> 16) & 0xFF),
+                UInt8((handle >>  8) & 0xFF),
+                UInt8(handle & 0xFF),
+            ]
+            completion(.success(FlutterStandardTypedData(bytes: Data(bytes))))
+        } catch {
+            completion(.failure(PluginError.unknown(error).asFlutterError))
+        }
+    }
+
+    func clearHandles(for peripheralID: UUID) {
+        deviceHandles[peripheralID]?.forEach { handle in
+            handleToCharacteristic.removeValue(forKey: handle)
+            pendingReadReplies.removeValue(forKey: handle)
+        }
+        deviceHandles.removeValue(forKey: peripheralID)
+    }
+
+    // ---- Binary data channel (flutter_reactive_ble_data) ----
+
+    func handleDataMessage(message: Data?, reply: @escaping FlutterBinaryReply) {
+        guard let data = message, data.count >= 5 else {
+            reply(errorResponse("invalid message"))
+            return
+        }
+        let op     = data[0]
+        let handle = Int32(data[1]) << 24 | Int32(data[2]) << 16 | Int32(data[3]) << 8 | Int32(data[4])
+        let payload = Data(data[5...])
+
+        switch op {
+        case 0x01: handleBinaryWrite(handle: handle, payload: payload, withResponse: true,  reply: reply)
+        case 0x02: handleBinaryWrite(handle: handle, payload: payload, withResponse: false, reply: reply)
+        case 0x03: handleBinaryRead(handle: handle, reply: reply)
+        default:   reply(errorResponse("unknown op \(op)"))
+        }
+    }
+
+    private func handleBinaryWrite(handle: Int32, payload: Data, withResponse: Bool, reply: @escaping FlutterBinaryReply) {
+        guard let characteristic = handleToCharacteristic[handle],
+              let peripheral = characteristic.service?.peripheral
+        else {
+            reply(errorResponse("unknown handle: \(handle)"))
+            return
+        }
+        peripheral.writeValue(payload, for: characteristic, type: withResponse ? .withResponse : .withoutResponse)
+        reply(successResponse())
+    }
+
+    private func handleBinaryRead(handle: Int32, reply: @escaping FlutterBinaryReply) {
+        guard let characteristic = handleToCharacteristic[handle],
+              let peripheral = characteristic.service?.peripheral
+        else {
+            reply(errorResponse("unknown handle: \(handle)"))
+            return
+        }
+        pendingReadReplies[handle] = reply
+        peripheral.readValue(for: characteristic)
+    }
+
+    private func successResponse() -> Data { Data([0x00]) }
+
+    private func errorResponse(_ msg: String) -> Data {
+        var data = Data([0x01])
+        data.append(msg.data(using: .utf8) ?? Data())
+        return data
     }
 
     // takes an error and converts it into a Flutter error

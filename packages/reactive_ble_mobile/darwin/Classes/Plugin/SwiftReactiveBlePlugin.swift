@@ -21,6 +21,17 @@ public class SwiftReactiveBlePlugin: NSObject, FlutterPlugin {
             .setStreamHandler(plugin.connectedDeviceStreamHandler)
         FlutterEventChannel(name: "flutter_reactive_ble_char_update", binaryMessenger: messenger)
             .setStreamHandler(plugin.characteristicValueUpdateStreamHandler)
+
+        // Register binary data channel
+        let dataChannel = FlutterBasicMessageChannel(
+            name: "flutter_reactive_ble_data",
+            binaryMessenger: messenger,
+            codec: FlutterBinaryCodec.sharedInstance()
+        )
+        dataChannel.setMessageHandler { [weak plugin] message, reply in
+            plugin?.context.handleDataMessage(message: message as? Data, reply: reply)
+        }
+        plugin.context.notificationMessenger = messenger
     }
 
     var statusStreamHandler: StreamHandler<PluginController> {
@@ -148,7 +159,10 @@ public class SwiftReactiveBlePlugin: NSObject, FlutterPlugin {
         }),
         AnyPlatformMethod(UnaryPlatformMethod(name: "readRssi") { (name, context, args: ReadRssiRequest, completion) in
             context.readRssi(name: name, args: args, completion: completion)
-        })
+        }),
+        AnyPlatformMethod(UnaryPlatformMethod(name: "negotiateHandle") { (name, context, args: ReadCharacteristicRequest, completion) in
+            context.negotiateHandle(name: name, args: args, completion: completion)
+        }),
     ])
 
     public func handle(_ call: FlutterMethodCall, result completion: @escaping FlutterResult) {
