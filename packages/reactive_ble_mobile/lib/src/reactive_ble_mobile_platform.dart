@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:async/async.dart' hide Result;
 import 'package:flutter/services.dart';
 import 'package:reactive_ble_platform_interface/reactive_ble_platform_interface.dart';
 
@@ -16,7 +15,6 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
     required BasicMessageChannel<ByteData?> bleDataChannel,
     required BasicMessageChannel<ByteData?> bleNotificationChannel,
     required Stream<List<int>> connectedDeviceChannel,
-    required Stream<List<int>> charUpdateChannel,
     required Stream<List<int>> bleDeviceScanChannel,
     required Stream<List<int>> bleStatusChannel,
     Logger? logger,
@@ -26,7 +24,6 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
         _bleDataChannel = bleDataChannel,
         _bleNotificationChannel = bleNotificationChannel,
         _connectedDeviceRawStream = connectedDeviceChannel,
-        _charUpdateRawStream = charUpdateChannel,
         _bleStatusRawChannel = bleStatusChannel,
         _bleDeviceScanRawStream = bleDeviceScanChannel,
         _logger = logger;
@@ -37,7 +34,6 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
   final BasicMessageChannel<ByteData?> _bleDataChannel;
   final BasicMessageChannel<ByteData?> _bleNotificationChannel;
   final Stream<List<int>> _connectedDeviceRawStream;
-  final Stream<List<int>> _charUpdateRawStream;
   final Stream<List<int>> _bleDeviceScanRawStream;
   final Stream<List<int>> _bleStatusRawChannel;
   final Logger? _logger;
@@ -67,17 +63,7 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
 
   @override
   Stream<CharacteristicValue> get charValueUpdateStream =>
-      _charValueStream ??= StreamGroup.merge([
-        _charUpdateRawStream.map(_protobufConverter.characteristicValueFrom).map(
-          (update) {
-            _logger?.log(
-              'Received $CharacteristicValue(characteristic: ${update.characteristic}, result: ${update.runtimeType})',
-            );
-            return update;
-          },
-        ),
-        _charValueController.stream,
-      ]);
+      _charValueStream ??= _charValueController.stream;
 
   @override
   Stream<ScanResult> get scanStream => _scanResultStream ??=
@@ -428,7 +414,6 @@ class ReactiveBleMobilePlatformFactory {
 
     const connectedDeviceChannel =
         EventChannel("flutter_reactive_ble_connected_device");
-    const charEventChannel = EventChannel("flutter_reactive_ble_char_update");
     const scanEventChannel = EventChannel("flutter_reactive_ble_scan");
     const bleStatusChannel = EventChannel("flutter_reactive_ble_status");
 
@@ -440,8 +425,6 @@ class ReactiveBleMobilePlatformFactory {
       bleNotificationChannel: _bleNotificationChannel,
       connectedDeviceChannel:
           connectedDeviceChannel.receiveBroadcastStream().cast<List<int>>(),
-      charUpdateChannel:
-          charEventChannel.receiveBroadcastStream().cast<List<int>>(),
       bleDeviceScanChannel:
           scanEventChannel.receiveBroadcastStream().cast<List<int>>(),
       bleStatusChannel:
