@@ -74,4 +74,20 @@ interface BleClient {
     ): Single<RequestConnectionPriorityResult>
 
     fun readRssi(deviceId: String): Single<Int>
+
+    fun negotiateHandle(
+        deviceId: String,
+        characteristicId: UUID,
+        characteristicInstanceId: Int,
+    ): Single<Int>
+
+    fun writeWithHandle(
+        handle: Int,
+        payload: ByteArray,
+        withResponse: Boolean,
+    ): Single<Unit>
+
+    fun readWithHandle(handle: Int): Single<ByteArray>
+
+    fun clearHandlesForDevice(deviceId: String)
 }

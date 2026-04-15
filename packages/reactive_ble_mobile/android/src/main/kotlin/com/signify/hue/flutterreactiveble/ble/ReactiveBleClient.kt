@@ -38,6 +38,18 @@ import kotlin.collections.component2
 open class ReactiveBleClient(private val context: Context) : BleClient {
     private val connectionQueue = ConnectionQueue()
     private val allConnections = CompositeDisposable()
+
+    // Handle map for binary data channel
+    private val handleCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
+    data class CachedChar(
+        val characteristic: android.bluetooth.BluetoothGattCharacteristic,
+        val deviceId: String,
+    )
+
+    private val handleToChar = java.util.concurrent.ConcurrentHashMap<Int, CachedChar>()
+    private val deviceHandles = java.util.concurrent.ConcurrentHashMap<String, MutableSet<Int>>()
+
     companion object {
         // this needs to be in companion update since background isolates respawn the event channels
         // Fix for https://github.com/PhilipsHue/flutter_reactive_ble/issues/277
@@ -132,11 +144,13 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
     }
 
     override fun disconnectDevice(deviceId: String) {
+        clearHandlesForDevice(deviceId)
         activeConnections[deviceId]?.disconnectDevice(deviceId)
         activeConnections.remove(deviceId)
     }
 
     override fun disconnectAllDevices() {
+        activeConnections.keys.forEach { clearHandlesForDevice(it) }
         activeConnections.forEach { (device, connector) -> connector.disconnectDevice(device) }
         allConnections.dispose()
     }
@@ -394,6 +408,85 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     )
             }
         }.firstOrError()
+
+    override fun negotiateHandle(
+        deviceId: String,
+        characteristicId: UUID,
+        characteristicInstanceId: Int,
+    ): Single<Int> =
+        getConnection(deviceId, shouldCheckDeviceStatus = true)
+            .flatMapSingle { result ->
+                when (result) {
+                    is EstablishedConnection ->
+                        result.rxConnection
+                            .resolveCharacteristic(characteristicId, characteristicInstanceId)
+                            .map { characteristic ->
+                                val handle = handleCounter.incrementAndGet()
+                                handleToChar[handle] = CachedChar(characteristic, deviceId)
+                                deviceHandles.getOrPut(deviceId) {
+                                    java.util.Collections.newSetFromMap(
+                                        java.util.concurrent.ConcurrentHashMap(),
+                                    )
+                                }.add(handle)
+                                handle
+                            }
+                    is EstablishConnectionFailure ->
+                        Single.error(Exception("Not connected: ${result.errorMessage}"))
+                }
+            }.firstOrError()
+
+    override fun writeWithHandle(
+        handle: Int,
+        payload: ByteArray,
+        withResponse: Boolean,
+    ): Single<Unit> {
+        val cached = handleToChar[handle]
+            ?: return Single.error(Exception("Unknown handle: $handle"))
+        return getConnection(cached.deviceId, shouldCheckDeviceStatus = true)
+            .flatMapSingle { result ->
+                when (result) {
+                    is EstablishedConnection -> {
+                        if (withResponse) {
+                            result.rxConnection.writeCharWithResponse(cached.characteristic, payload)
+                        } else {
+                            result.rxConnection.writeCharWithoutResponse(cached.characteristic, payload)
+                        }.map { Unit }
+                    }
+                    is EstablishConnectionFailure ->
+                        Single.error(Exception("Not connected: ${result.errorMessage}"))
+                }
+            }.firstOrError()
+    }
+
+    override fun readWithHandle(handle: Int): Single<ByteArray> {
+        val cached = handleToChar[handle]
+            ?: return Single.error(Exception("Unknown handle: $handle"))
+        return getConnection(cached.deviceId, shouldCheckDeviceStatus = true)
+            .flatMapSingle { result ->
+                when (result) {
+                    is EstablishedConnection ->
+                        result.rxConnection.readCharacteristic(cached.characteristic)
+                            .retry(1) { android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O }
+                    is EstablishConnectionFailure ->
+                        Single.error(Exception("Not connected: ${result.errorMessage}"))
+                }
+            }.firstOrError()
+    }
+
+    override fun clearHandlesForDevice(deviceId: String) {
+        deviceHandles.remove(deviceId)?.forEach { handle ->
+            handleToChar.remove(handle)
+        }
+    }
+
+    fun getCachedChar(handle: Int): CachedChar? = handleToChar[handle]
+
+    fun getHandleForChar(deviceId: String, charUuid: UUID, instanceId: Int): Int? =
+        handleToChar.entries.firstOrNull { entry ->
+            entry.value.deviceId == deviceId &&
+                entry.value.characteristic.uuid == charUuid &&
+                entry.value.characteristic.instanceId == instanceId
+        }?.key
 
     // enable this for extra debug output on the android stack
     private fun enableDebugLogging() =

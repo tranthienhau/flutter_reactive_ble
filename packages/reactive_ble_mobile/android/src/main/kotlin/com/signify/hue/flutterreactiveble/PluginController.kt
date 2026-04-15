@@ -40,6 +40,7 @@ class PluginController {
             "discoverServices" to this::discoverServices,
             "getDiscoveredServices" to this::discoverServices,
             "readRssi" to this::readRssi,
+            "negotiateHandle" to this::negotiateHandle,
         )
 
     private lateinit var bleClient: com.signify.hue.flutterreactiveble.ble.BleClient
@@ -387,6 +388,105 @@ class PluginController {
                 result.error("read_rssi_error", error.message, null)
             })
             .discard()
+    }
+
+    private fun negotiateHandle(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val request = pb.ReadCharacteristicRequest.parseFrom(call.arguments as ByteArray)
+        bleClient.negotiateHandle(
+            request.characteristic.deviceId,
+            uuidConverter.uuidFromByteArray(
+                request.characteristic.characteristicUuid.data.toByteArray(),
+            ),
+            request.characteristic.characteristicInstanceId.toInt(),
+        )
+            .observeOn(AndroidSchedulers.mainThread())
+            .subscribe(
+                { handle ->
+                    val bytes = ByteArray(4)
+                    bytes[0] = (handle shr 24).toByte()
+                    bytes[1] = (handle shr 16).toByte()
+                    bytes[2] = (handle shr 8).toByte()
+                    bytes[3] = handle.toByte()
+                    result.success(bytes)
+                },
+                { throwable ->
+                    result.error("negotiate_handle_error", throwable.message, null)
+                },
+            )
+            .discard()
+    }
+
+    // ---- Binary data channel (flutter_reactive_ble_data) ----
+
+    internal fun handleDataMessage(
+        message: java.nio.ByteBuffer?,
+        reply: io.flutter.plugin.common.BinaryMessenger.BinaryReply,
+    ) {
+        if (message == null || message.remaining() < 5) {
+            reply.reply(errorResponse("invalid message length"))
+            return
+        }
+        val bytes = ByteArray(message.remaining()).also { message.get(it) }
+        val op = bytes[0].toInt() and 0xFF
+        val handle = ((bytes[1].toInt() and 0xFF) shl 24) or
+            ((bytes[2].toInt() and 0xFF) shl 16) or
+            ((bytes[3].toInt() and 0xFF) shl 8) or
+            (bytes[4].toInt() and 0xFF)
+        val payload = bytes.copyOfRange(5, bytes.size)
+
+        when (op) {
+            0x01 -> handleBinaryWrite(handle, payload, withResponse = true, reply)
+            0x02 -> handleBinaryWrite(handle, payload, withResponse = false, reply)
+            0x03 -> handleBinaryRead(handle, reply)
+            else -> reply.reply(errorResponse("unknown op: $op"))
+        }
+    }
+
+    private fun handleBinaryWrite(
+        handle: Int,
+        payload: ByteArray,
+        withResponse: Boolean,
+        reply: io.flutter.plugin.common.BinaryMessenger.BinaryReply,
+    ) {
+        bleClient.writeWithHandle(handle, payload, withResponse)
+            .observeOn(AndroidSchedulers.mainThread())
+            .subscribe(
+                { reply.reply(successResponse()) },
+                { error -> reply.reply(errorResponse(error.message ?: "write failed")) },
+            )
+            .discard()
+    }
+
+    private fun handleBinaryRead(
+        handle: Int,
+        reply: io.flutter.plugin.common.BinaryMessenger.BinaryReply,
+    ) {
+        bleClient.readWithHandle(handle)
+            .observeOn(AndroidSchedulers.mainThread())
+            .subscribe(
+                { bytes ->
+                    val response = ByteArray(1 + bytes.size)
+                    response[0] = 0x00
+                    bytes.copyInto(response, 1)
+                    reply.reply(java.nio.ByteBuffer.wrap(response))
+                },
+                { error -> reply.reply(errorResponse(error.message ?: "read failed")) },
+            )
+            .discard()
+    }
+
+    private fun successResponse(): java.nio.ByteBuffer =
+        java.nio.ByteBuffer.wrap(byteArrayOf(0x00))
+
+    private fun errorResponse(message: String): java.nio.ByteBuffer {
+        val msgBytes = message.toByteArray(Charsets.UTF_8)
+        val buf = ByteArray(1 + msgBytes.size)
+        buf[0] = 0x01
+        msgBytes.copyInto(buf, 1)
+        return java.nio.ByteBuffer.wrap(buf)
     }
 
 }

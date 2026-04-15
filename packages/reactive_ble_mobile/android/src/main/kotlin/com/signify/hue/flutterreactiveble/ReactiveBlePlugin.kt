@@ -29,6 +29,9 @@ class ReactiveBlePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             channel.setMethodCallHandler(plugin)
             pluginController = PluginController()
             pluginController.initialize(messenger, context)
+            messenger.setMessageHandler("flutter_reactive_ble_data") { message, reply ->
+                pluginController.handleDataMessage(message, reply)
+            }
         }
 
         @JvmStatic
