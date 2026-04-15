@@ -1,6 +1,10 @@
+import 'dart:async';
+
+import 'package:async/async.dart' hide Result;
 import 'package:flutter/services.dart';
 import 'package:reactive_ble_platform_interface/reactive_ble_platform_interface.dart';
 
+import 'binary_protocol.dart';
 import 'converter/args_to_protubuf_converter.dart';
 import 'converter/protobuf_converter.dart';
 
@@ -9,6 +13,8 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
     required ArgsToProtobufConverter argsToProtobufConverter,
     required ProtobufConverter protobufConverter,
     required MethodChannel bleMethodChannel,
+    required BasicMessageChannel<ByteData?> bleDataChannel,
+    required BasicMessageChannel<ByteData?> bleNotificationChannel,
     required Stream<List<int>> connectedDeviceChannel,
     required Stream<List<int>> charUpdateChannel,
     required Stream<List<int>> bleDeviceScanChannel,
@@ -17,6 +23,8 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
   })  : _argsToProtobufConverter = argsToProtobufConverter,
         _protobufConverter = protobufConverter,
         _bleMethodChannel = bleMethodChannel,
+        _bleDataChannel = bleDataChannel,
+        _bleNotificationChannel = bleNotificationChannel,
         _connectedDeviceRawStream = connectedDeviceChannel,
         _charUpdateRawStream = charUpdateChannel,
         _bleStatusRawChannel = bleStatusChannel,
@@ -26,11 +34,18 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
   final ArgsToProtobufConverter _argsToProtobufConverter;
   final ProtobufConverter _protobufConverter;
   final MethodChannel _bleMethodChannel;
+  final BasicMessageChannel<ByteData?> _bleDataChannel;
+  final BasicMessageChannel<ByteData?> _bleNotificationChannel;
   final Stream<List<int>> _connectedDeviceRawStream;
   final Stream<List<int>> _charUpdateRawStream;
   final Stream<List<int>> _bleDeviceScanRawStream;
   final Stream<List<int>> _bleStatusRawChannel;
   final Logger? _logger;
+
+  final _handleCache = <CharacteristicInstance, int>{};
+  final _reverseHandleCache = <int, CharacteristicInstance>{};
+  final _charValueController = StreamController<CharacteristicValue>.broadcast();
+  StreamSubscription<ConnectionStateUpdate>? _disconnectSub;
 
   Stream<ConnectionStateUpdate>? _connectionUpdateStream;
   Stream<CharacteristicValue>? _charValueStream;
@@ -52,16 +67,17 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
 
   @override
   Stream<CharacteristicValue> get charValueUpdateStream =>
-      _charValueStream ??= _charUpdateRawStream
-          .map(_protobufConverter.characteristicValueFrom)
-          .map(
-        (update) {
-          _logger?.log(
-            'Received $CharacteristicValue(characteristic: ${update.characteristic}, result: ${update.runtimeType})',
-          );
-          return update;
-        },
-      );
+      _charValueStream ??= StreamGroup.merge([
+        _charUpdateRawStream.map(_protobufConverter.characteristicValueFrom).map(
+          (update) {
+            _logger?.log(
+              'Received $CharacteristicValue(characteristic: ${update.characteristic}, result: ${update.runtimeType})',
+            );
+            return update;
+          },
+        ),
+        _charValueController.stream,
+      ]);
 
   @override
   Stream<ScanResult> get scanStream => _scanResultStream ??=
@@ -86,7 +102,51 @@ class ReactiveBleMobilePlatform extends ReactiveBlePlatform {
   @override
   Future<void> initialize() {
     _logger?.log('Initialize BLE platform');
+    _setup();
     return _bleMethodChannel.invokeMethod("initialize");
+  }
+
+  void _setup() {
+    _disconnectSub?.cancel();
+    _disconnectSub = connectionUpdateStream.listen((update) {
+      if (update.connectionState == DeviceConnectionState.disconnected) {
+        final deviceId = update.deviceId;
+        _handleCache.removeWhere((char, _) => char.deviceId == deviceId);
+        _reverseHandleCache.removeWhere((_, char) => char.deviceId == deviceId);
+      }
+    });
+
+    _bleNotificationChannel.setMessageHandler((ByteData? data) async {
+      if (data == null) return null;
+      final decoded = decodeNotification(data);
+      final char = _reverseHandleCache[decoded.handle];
+      if (char != null) {
+        _charValueController.add(CharacteristicValue(
+          characteristic: char,
+          result: Result.success(decoded.payload.toList()),
+        ));
+      }
+      return null;
+    });
+  }
+
+  Future<int> _getOrNegotiateHandle(CharacteristicInstance characteristic) async {
+    final cached = _handleCache[characteristic];
+    if (cached != null) return cached;
+
+    final bytes = await _bleMethodChannel.invokeMethod<List<int>>(
+      'negotiateHandle',
+      _argsToProtobufConverter
+          .createReadCharacteristicRequest(characteristic)
+          .writeToBuffer(),
+    );
+    if (bytes == null || bytes.length < 4) {
+      throw Exception('negotiateHandle: invalid response');
+    }
+    final handle = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+    _handleCache[characteristic] = handle;
+    _reverseHandleCache[handle] = characteristic;
+    return handle;
   }
 
   @override
@@ -319,6 +379,14 @@ class ReactiveBleMobilePlatformFactory {
 
   ReactiveBleMobilePlatform create({Logger? logger}) {
     const _bleMethodChannel = MethodChannel("flutter_reactive_ble_method");
+    const _bleDataChannel = BasicMessageChannel<ByteData?>(
+      'flutter_reactive_ble_data',
+      BinaryCodec(),
+    );
+    const _bleNotificationChannel = BasicMessageChannel<ByteData?>(
+      'flutter_reactive_ble_char_update_binary',
+      BinaryCodec(),
+    );
 
     const connectedDeviceChannel =
         EventChannel("flutter_reactive_ble_connected_device");
@@ -330,6 +398,8 @@ class ReactiveBleMobilePlatformFactory {
       protobufConverter: const ProtobufConverterImpl(),
       argsToProtobufConverter: const ArgsToProtobufConverterImpl(),
       bleMethodChannel: _bleMethodChannel,
+      bleDataChannel: _bleDataChannel,
+      bleNotificationChannel: _bleNotificationChannel,
       connectedDeviceChannel:
           connectedDeviceChannel.receiveBroadcastStream().cast<List<int>>(),
       charUpdateChannel:
