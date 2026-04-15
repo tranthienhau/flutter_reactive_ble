@@ -47,7 +47,6 @@ class PluginController {
 
     private lateinit var scanchannel: EventChannel
     private lateinit var deviceConnectionChannel: EventChannel
-    private lateinit var charNotificationChannel: EventChannel
 
     private lateinit var scanDevicesHandler: ScanDevicesHandler
     private lateinit var deviceConnectionHandler: DeviceConnectionHandler
@@ -64,17 +63,15 @@ class PluginController {
 
         scanchannel = EventChannel(messenger, "flutter_reactive_ble_scan")
         deviceConnectionChannel = EventChannel(messenger, "flutter_reactive_ble_connected_device")
-        charNotificationChannel = EventChannel(messenger, "flutter_reactive_ble_char_update")
         val bleStatusChannel = EventChannel(messenger, "flutter_reactive_ble_status")
 
         scanDevicesHandler = ScanDevicesHandler(bleClient)
         deviceConnectionHandler = DeviceConnectionHandler(bleClient)
-        charNotificationHandler = CharNotificationHandler(bleClient)
+        charNotificationHandler = CharNotificationHandler(bleClient, messenger)
         val bleStatusHandler = BleStatusHandler(bleClient)
 
         scanchannel.setStreamHandler(scanDevicesHandler)
         deviceConnectionChannel.setStreamHandler(deviceConnectionHandler)
-        charNotificationChannel.setStreamHandler(charNotificationHandler)
         bleStatusChannel.setStreamHandler(bleStatusHandler)
     }
 

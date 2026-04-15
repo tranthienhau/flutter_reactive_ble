@@ -1,60 +1,63 @@
 package com.signify.hue.flutterreactiveble.channelhandlers
 
 import com.polidea.rxandroidble2.exceptions.BleDisconnectedException
-import com.signify.hue.flutterreactiveble.converters.ProtobufMessageConverter
 import com.signify.hue.flutterreactiveble.converters.UuidConverter
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.disposables.Disposable
 import com.signify.hue.flutterreactiveble.ProtobufModel as pb
 
-class CharNotificationHandler(private val bleClient: com.signify.hue.flutterreactiveble.ble.BleClient) :
-    EventChannel.StreamHandler {
+class CharNotificationHandler(
+    private val bleClient: com.signify.hue.flutterreactiveble.ble.BleClient,
+    private val binaryMessenger: BinaryMessenger,
+) : EventChannel.StreamHandler {
     private val uuidConverter = UuidConverter()
-    private val protobufConverter = ProtobufMessageConverter()
 
     companion object {
-        private var charNotificationSink: EventChannel.EventSink? = null
-
+        private const val CHAR_UPDATE_CHANNEL = "flutter_reactive_ble_char_update_binary"
         private val subscriptionMap = mutableMapOf<pb.CharacteristicAddress, Disposable>()
     }
 
-    override fun onListen(
-        objectSink: Any?,
-        eventSink: EventChannel.EventSink?,
-    ) {
-        eventSink?.let {
-            charNotificationSink = eventSink
-        }
-    }
+    override fun onListen(objectSink: Any?, eventSink: EventChannel.EventSink?) {}
 
     override fun onCancel(objectSink: Any?) {
         unsubscribeFromAllNotifications()
     }
 
     fun subscribeToNotifications(request: pb.NotifyCharacteristicRequest) {
-        val charUuid =
-            uuidConverter
-                .uuidFromByteArray(request.characteristic.characteristicUuid.data.toByteArray())
-        val subscription =
-            bleClient.setupNotification(
-                request.characteristic.deviceId,
-                charUuid,
-                request.characteristic.characteristicInstanceId.toInt(),
-            )
-                .observeOn(AndroidSchedulers.mainThread())
-                .subscribe({ value ->
-                    handleNotificationValue(request.characteristic, value)
-                }, {
-                    when (it) {
-                        is BleDisconnectedException -> {
+        val charUuid = uuidConverter.uuidFromByteArray(
+            request.characteristic.characteristicUuid.data.toByteArray()
+        )
+        val instanceId = request.characteristic.characteristicInstanceId.toInt()
+        val deviceId = request.characteristic.deviceId
+
+        val client = bleClient as? com.signify.hue.flutterreactiveble.ble.ReactiveBleClient
+        val existingHandle = client?.getHandleForChar(deviceId, charUuid, instanceId)
+
+        val handleSingle = if (existingHandle != null) {
+            io.reactivex.Single.just(existingHandle)
+        } else {
+            bleClient.negotiateHandle(deviceId, charUuid, instanceId)
+        }
+
+        val subscription = handleSingle
+            .flatMapObservable { handle ->
+                bleClient.setupNotification(deviceId, charUuid, instanceId)
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .doOnNext { value -> handleNotificationValue(handle, value) }
+            }
+            .subscribe(
+                { /* handled in doOnNext */ },
+                { error ->
+                    when (error) {
+                        is BleDisconnectedException ->
                             subscriptionMap.remove(request.characteristic)?.dispose()
-                        }
-                        else -> {
-                            handleNotificationError(request.characteristic, it)
-                        }
+                        else ->
+                            handleNotificationError(request.characteristic, error)
                     }
-                })
+                }
+            )
         subscriptionMap[request.characteristic] = subscription
     }
 
@@ -62,37 +65,30 @@ class CharNotificationHandler(private val bleClient: com.signify.hue.flutterreac
         subscriptionMap.remove(request.characteristic)?.dispose()
     }
 
-    fun addSingleReadToStream(charInfo: pb.CharacteristicValueInfo) {
-        handleNotificationValue(charInfo.characteristic, charInfo.value.toByteArray())
-    }
-
-    fun addSingleErrorToStream(
-        subscriptionRequest: pb.CharacteristicAddress,
-        error: String,
-    ) {
-        val convertedMsg = protobufConverter.convertCharacteristicError(subscriptionRequest, error)
-        charNotificationSink?.success(convertedMsg.toByteArray())
-    }
-
     private fun unsubscribeFromAllNotifications() {
-        charNotificationSink = null
         subscriptionMap.forEach { it.value.dispose() }
+        subscriptionMap.clear()
     }
 
-    private fun handleNotificationValue(
-        subscriptionRequest: pb.CharacteristicAddress,
-        value: ByteArray,
-    ) {
-        val convertedMsg = protobufConverter.convertCharacteristicInfo(subscriptionRequest, value)
-        charNotificationSink?.success(convertedMsg.toByteArray())
+    private fun handleNotificationValue(handle: Int, value: ByteArray) {
+        val encoded = ByteArray(4 + value.size)
+        encoded[0] = (handle shr 24).toByte()
+        encoded[1] = (handle shr 16).toByte()
+        encoded[2] = (handle shr 8).toByte()
+        encoded[3] = handle.toByte()
+        value.copyInto(encoded, 4)
+        binaryMessenger.send(CHAR_UPDATE_CHANNEL, java.nio.ByteBuffer.wrap(encoded), null)
     }
 
     private fun handleNotificationError(
-        subscriptionRequest: pb.CharacteristicAddress,
+        address: pb.CharacteristicAddress,
         error: Throwable,
     ) {
-        val convertedMsg =
-            protobufConverter.convertCharacteristicError(subscriptionRequest, error.message ?: "")
-        charNotificationSink?.success(convertedMsg.toByteArray())
+        val msgBytes = (error.message ?: "notification error").toByteArray(Charsets.UTF_8)
+        val encoded = ByteArray(4 + 1 + msgBytes.size)
+        // handle = 0 (unknown), status byte = 0x01
+        encoded[4] = 0x01
+        msgBytes.copyInto(encoded, 5)
+        binaryMessenger.send(CHAR_UPDATE_CHANNEL, java.nio.ByteBuffer.wrap(encoded), null)
     }
 }
