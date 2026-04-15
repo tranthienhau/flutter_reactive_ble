@@ -22,9 +22,7 @@ final class PluginController {
             }
         }
     }
-    var messageQueue: [CharacteristicValueInfo] = []
     var connectedDeviceSink: EventSink?
-    var characteristicValueUpdateSink: EventSink?
 
     // Handle map for binary data channel
     private var handleCounter: Int32 = 0
@@ -136,32 +134,27 @@ final class PluginController {
                     return
                 }
 
-                // Fall through to existing protobuf notification sink
-                let message = CharacteristicValueInfo.with {
-                    $0.characteristic = CharacteristicAddress.with {
-                        $0.characteristicUuid = Uuid.with { $0.data = characteristic.id.data }
-                        $0.characteristicInstanceID = characteristic.instanceID
-                        $0.serviceUuid = Uuid.with { $0.data = characteristic.serviceID.data }
-                        $0.serviceInstanceID = characteristic.serviceInstanceID
-                        $0.deviceID = characteristic.peripheralID.uuidString
-                    }
-                    if let value = value {
-                        $0.value = value
-                    }
-                    if let error = error {
-                        $0.failure = GenericFailure.with {
-                            $0.code = Int32(CharacteristicValueUpdateFailure.unknown.rawValue)
-                            $0.message = "\(error)"
-                        }
-                    }
+                // Push binary notification: [4B handle BE][N bytes payload]
+                guard let cbChar = context.handleToCharacteristic.values.first(where: { $0.uuid == CBUUID(data: characteristic.id.data) }),
+                      let handle = context.handleToCharacteristic.first(where: { $0.value === cbChar })?.key
+                else {
+                    // Characteristic not yet negotiated — skip
+                    return
                 }
-                let sink = context.characteristicValueUpdateSink
-                if sink != nil {
-                    sink!.add(.success(message))
-                } else {
-                    // In case message arrives before sink is created
-                    context.messageQueue.append(message)
-                }
+                guard let value = value else { return }
+
+                var data = Data(capacity: 4 + value.count)
+                data.append(UInt8((handle >> 24) & 0xFF))
+                data.append(UInt8((handle >> 16) & 0xFF))
+                data.append(UInt8((handle >> 8) & 0xFF))
+                data.append(UInt8(handle & 0xFF))
+                data.append(value)
+
+                context.notificationMessenger?.send(
+                    onChannel: "flutter_reactive_ble_char_update_binary",
+                    message: data,
+                    binaryReply: nil
+                )
             }
         )
 
@@ -478,20 +471,7 @@ final class PluginController {
         do {
             try central.read(characteristic: characteristic)
         } catch {
-            guard let sink = characteristicValueUpdateSink
-            else {
-                print("Warning! No subscription to report a characteristic read failure: \(error)")
-                return
-            }
-
-            let message = CharacteristicValueInfo.with {
-                $0.characteristic = args.characteristic
-                $0.failure = GenericFailure.with {
-                    $0.code = Int32(CharacteristicValueUpdateFailure.unknown.rawValue)
-                    $0.message = "\(error)"
-                }
-            }
-            sink.add(.success(message))
+            print("Warning! characteristic read failed (legacy path): \(error)")
         }
     }
 

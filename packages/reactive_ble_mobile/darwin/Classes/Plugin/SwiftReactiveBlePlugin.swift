@@ -19,9 +19,6 @@ public class SwiftReactiveBlePlugin: NSObject, FlutterPlugin {
             .setStreamHandler(plugin.scanStreamHandler)
         FlutterEventChannel(name: "flutter_reactive_ble_connected_device", binaryMessenger: messenger)
             .setStreamHandler(plugin.connectedDeviceStreamHandler)
-        FlutterEventChannel(name: "flutter_reactive_ble_char_update", binaryMessenger: messenger)
-            .setStreamHandler(plugin.characteristicValueUpdateStreamHandler)
-
         // Register binary data channel
         let dataChannel = FlutterBasicMessageChannel(
             name: "flutter_reactive_ble_data",
@@ -72,26 +69,6 @@ public class SwiftReactiveBlePlugin: NSObject, FlutterPlugin {
             },
             onCancel: { context in
                 context.connectedDeviceSink = nil
-                return nil
-            }
-        )
-    }
-
-    var characteristicValueUpdateStreamHandler: StreamHandler<PluginController> {
-        return StreamHandler(
-            name: "characteristic value update stream handler",
-            context: context,
-            onListen: { context, sink in
-                context.characteristicValueUpdateSink = sink
-                context.messageQueue.forEach { msg in
-                    sink.add(.success(msg))
-                }
-                context.messageQueue.removeAll()
-                return nil
-            },
-            onCancel: { context in
-                context.messageQueue.removeAll()
-                context.characteristicValueUpdateSink = nil
                 return nil
             }
         )
